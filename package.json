@@ -1,15 +1,16 @@
 {
   "name": "abdul-bot",
   "version": "1.0.0",
-  "description": "",
+  "description": "iPhone shop Telegram bot",
   "main": "index.js",
+  "type": "commonjs",
   "scripts": {
+    "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
