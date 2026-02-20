@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 10000;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
 const SERVER_URL = process.env.SERVER_URL;
-const CHANNEL_ID = process.env.CHANNEL_ID; // your Telegram channel username or ID
+const CHANNEL_ID = process.env.CHANNEL_ID;
 
 if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SERVER_URL || !CHANNEL_ID) {
   console.error("❌ BOT_TOKEN, ADMIN_CHAT_ID, SERVER_URL, or CHANNEL_ID missing in .env");
@@ -59,17 +59,15 @@ bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
   const location = msg.location;
+  const state = userStates[chatId];
 
   if (!text && !msg.photo && !location) return;
-
-  const state = userStates[chatId];
 
   // ===== START =====
   if (/hi|hello|\/start/i.test(text) && !state) {
     userStates[chatId] = { step: 'condition' };
     return bot.sendMessage(chatId, `👋 Welcome! Select phone condition:`, { reply_markup: { keyboard: chunkArray(CONDITIONS,2), resize_keyboard: true } });
   }
-
   if (!state) return;
 
   // ===== ORDER FLOW =====
@@ -86,19 +84,24 @@ bot.on('message', async (msg) => {
     bot.sendPhoto(ADMIN_CHAT_ID, state.paymentScreenshot, { caption: `💳 PAYMENT RECEIVED\nOrder by ${state.name}` });
     bot.sendMessage(chatId, "✅ Screenshot received by admin.");
     postToStory(`Payment screenshot received from ${state.name}`);
-    // proceed to delivery/pickup
     state.step = 'delivery';
     return askDeliveryOption(chatId);
   }
 
-  // ===== LOCATION FOR DELIVERY =====
-  if (location && state.step === 'location') {
-    state.location = location;
-    finalizeOrder(chatId, state);
-    return;
+  // ===== SKIP PAYMENT =====
+  if (text && text.toLowerCase() === 'skip' && state.step === 'payment') { state.step = 'delivery'; return askDeliveryOption(chatId); }
+
+  // ===== DELIVERY OR PICKUP =====
+  if (state.step === 'delivery' && (text === 'Pickup' || text === 'Delivery')) {
+    state.deliveryType = text;
+    if (text === 'Delivery') { state.step = 'location'; return bot.sendMessage(chatId, '📍 Please share your location:', { reply_markup: { keyboard: [['Send Location']], resize_keyboard: true } }); }
+    return finalizeBeforePrice(chatId, state);
   }
 
-  // ===== ADMIN ENTER PRICE (for backend) =====
+  // ===== LOCATION FOR DELIVERY =====
+  if (location && state.step === 'location') { state.location = location; return finalizeBeforePrice(chatId, state); }
+
+  // ===== ADMIN ENTER PRICE =====
   if (chatId.toString() === ADMIN_CHAT_ID && text) {
     const pendingOrder = Object.values(orders).find(o => o.awaitingPrice);
     if (pendingOrder) {
@@ -106,6 +109,7 @@ bot.on('message', async (msg) => {
       pendingOrder.awaitingPrice = false;
       bot.sendMessage(pendingOrder.userChatId, `✅ Price set: GHS ${text}`);
       postToStory(`Price set for order ${pendingOrder.orderId}`);
+      sendFinalSummary(pendingOrder);
     }
   }
 });
@@ -113,10 +117,7 @@ bot.on('message', async (msg) => {
 // ===== ASK PAYMENT OPTION =====
 function askPaymentOption(chatId) {
   userStates[chatId].step = 'payment';
-  bot.sendMessage(chatId,
-    "💳 Payment is optional now. If you want, send screenshot. Otherwise, type 'skip' to continue.",
-    { reply_markup: { keyboard: [['skip']], resize_keyboard: true } }
-  );
+  bot.sendMessage(chatId, "💳 Payment is optional. Send screenshot or type 'skip' to continue.", { reply_markup: { keyboard: [['skip']], resize_keyboard: true } });
 }
 
 // ===== ASK DELIVERY OR PICKUP =====
@@ -125,12 +126,13 @@ function askDeliveryOption(chatId) {
   bot.sendMessage(chatId, "🏠 Pickup or Delivery?", { reply_markup: { keyboard: [['Pickup','Delivery']], resize_keyboard: true } });
 }
 
-// ===== FINALIZE ORDER =====
-function finalizeOrder(chatId, state) {
+// ===== SAVE ORDER AND WAIT FOR ADMIN PRICE =====
+function finalizeBeforePrice(chatId, state) {
   const orderId = `ORD-${Date.now()}`;
-  orders[orderId] = { orderId, userChatId: chatId, ...state };
-  
-  const summary = `
+  orders[orderId] = { orderId, userChatId: chatId, ...state, awaitingPrice: true };
+  delete userStates[chatId];
+
+  let summary = `
 🛒 ORDER SUMMARY
 Order ID: ${orderId}
 Model: ${state.model}
@@ -139,18 +141,50 @@ Storage: ${state.storage}
 Color: ${state.color}
 Name: ${state.name}
 Phone: ${state.phone}
-Delivery type: ${state.step==='location'?'Delivery':'Pickup'}
+Delivery type: ${state.deliveryType}
 Location: ${state.location ? `lat:${state.location.latitude}, long:${state.location.longitude}` : 'N/A'}
   `;
-  
-  bot.sendMessage(chatId, summary, { reply_markup: { remove_keyboard: true } });
-  postToStory(`Order ${orderId} finalized for ${state.name}`);
-  bot.sendMessage(ADMIN_CHAT_ID, `📦 NEW ORDER\n${summary}`);
-  delete userStates[chatId];
+  bot.sendMessage(chatId, "⏳ Your order is waiting for admin price confirmation.");
+  bot.sendMessage(ADMIN_CHAT_ID, `📦 NEW ORDER (Awaiting price)\n${summary}`, {
+    reply_markup: { inline_keyboard: [[{ text: "✅ Confirm Order", callback_data: `confirm_${orderId}` }]] }
+  });
+  postToStory(`New order ${orderId} awaiting price`);
 }
 
-// ===== CALLBACK HANDLER (if needed for admin buttons) =====
-bot.on('callback_query', (query) => { bot.answerCallbackQuery(query.id); });
+// ===== SEND FINAL SUMMARY TO USER =====
+function sendFinalSummary(order) {
+  const summary = `
+✅ ORDER CONFIRMED
+🛒 ORDER DETAILS
+Order ID: ${order.orderId}
+Model: ${order.model}
+Condition: ${order.condition}
+Storage: ${order.storage}
+Color: ${order.color}
+Customer: ${order.name}
+Phone: ${order.phone}
+Delivery type: ${order.deliveryType}
+Location: ${order.location ? `lat:${order.location.latitude}, long:${order.location.longitude}` : 'N/A'}
+💰 Price: GHS ${order.price}
+Status: PAID ✅
+  `;
+  bot.sendMessage(order.userChatId, summary);
+  bot.sendMessage(ADMIN_CHAT_ID, `📦 ORDER COMPLETED\n${summary}`);
+  postToStory(`Order ${order.orderId} completed for ${order.name}`);
+}
+
+// ===== CALLBACK HANDLER =====
+bot.on('callback_query', (query) => {
+  const chatId = query.message.chat.id;
+  const [action, orderId] = query.data.split('_');
+  const order = orders[orderId];
+  if (!order) return;
+
+  if (chatId.toString() === ADMIN_CHAT_ID && action === 'confirm') {
+    bot.sendMessage(ADMIN_CHAT_ID, `💰 Enter price for order ${orderId}:`);
+  }
+  bot.answerCallbackQuery(query.id);
+});
 
 // ===== START SERVER =====
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
