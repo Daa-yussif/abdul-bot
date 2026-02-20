@@ -6,23 +6,30 @@ const TelegramBot = require('node-telegram-bot-api');
 const PORT = process.env.PORT || 10000;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
-const SERVER_URL = process.env.SERVER_URL;
-const CHANNEL_ID = process.env.CHANNEL_ID;
+const SERVER_URL = process.env.SERVER_URL; // Only needed for webhook
+const CHANNEL_ID = process.env.CHANNEL_ID; // Optional for posting story
 
-if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SERVER_URL || !CHANNEL_ID) {
-  console.error("❌ BOT_TOKEN, ADMIN_CHAT_ID, SERVER_URL, or CHANNEL_ID missing in .env");
+if (!BOT_TOKEN || !ADMIN_CHAT_ID || !SERVER_URL) {
+  console.error("❌ BOT_TOKEN, ADMIN_CHAT_ID, or SERVER_URL missing in .env");
   process.exit(1);
 }
 
-// ===== EXPRESS APP =====
+// ===== EXPRESS SETUP =====
 const app = express();
 app.use(express.json());
+
 app.get('/', (req, res) => res.status(200).send('✅ iPhone Bot is running'));
 
-// ===== TELEGRAM BOT (WEBHOOK MODE) =====
-const bot = new TelegramBot(BOT_TOKEN);
+// ===== TELEGRAM BOT SETUP =====
+let bot;
+bot = new TelegramBot(BOT_TOKEN);
 bot.setWebHook(`${SERVER_URL}/bot${BOT_TOKEN}`);
-app.post(`/bot${BOT_TOKEN}`, (req, res) => { bot.processUpdate(req.body); res.sendStatus(200); });
+
+app.post(`/bot${BOT_TOKEN}`, (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
+});
+
 console.log(`🔹 Bot webhook set to: ${SERVER_URL}/bot${BOT_TOKEN}`);
 
 // ===== DATA =====
@@ -41,10 +48,12 @@ const IPHONE_17_COLORS = ['Orange','White','Black'];
 const userStates = {};
 const orders = {};
 
-// ===== HELPER: POST TO CHANNEL STORY =====
+// ===== HELPER: POST TO STORY =====
 function postToStory(status) {
-  const timestamp = new Date().toLocaleString();
-  bot.sendMessage(CHANNEL_ID, `📌 ${status}\n🕒 ${timestamp}`);
+  if (CHANNEL_ID) {
+    const timestamp = new Date().toLocaleString();
+    bot.sendMessage(CHANNEL_ID, `📌 ${status}\n🕒 ${timestamp}`);
+  }
 }
 
 // ===== HELPER: CHUNK ARRAY FOR KEYBOARD =====
@@ -54,104 +63,19 @@ function chunkArray(arr, size) {
   return result;
 }
 
-// ================= USER MESSAGES =================
-bot.on('message', async (msg) => {
-  const chatId = msg.chat.id;
-  const text = msg.text;
-  const location = msg.location;
-  const state = userStates[chatId];
-
-  if (!text && !msg.photo && !location) return;
-
-  // ===== START =====
-  if (/hi|hello|\/start/i.test(text) && !state) {
-    userStates[chatId] = { step: 'condition' };
-    return bot.sendMessage(chatId, `👋 Welcome! Select phone condition:`, { reply_markup: { keyboard: chunkArray(CONDITIONS,2), resize_keyboard: true } });
-  }
-  if (!state) return;
-
-  // ===== ORDER FLOW =====
-  if (state.step === 'condition' && CONDITIONS.includes(text)) { state.condition = text; state.step = 'model'; return bot.sendMessage(chatId, 'Select model:', { reply_markup: { keyboard: chunkArray(MODELS,3), resize_keyboard: true } }); }
-  if (state.step === 'model' && MODELS.includes(text)) { state.model = text; state.step = 'storage'; return bot.sendMessage(chatId, 'Select storage:', { reply_markup: { keyboard: chunkArray(STORAGE,3), resize_keyboard: true } }); }
-  if (state.step === 'storage') { state.storage = text; state.step = 'color'; const colors = state.model.includes('iPhone 17') ? IPHONE_17_COLORS : COLORS; return bot.sendMessage(chatId, 'Pick color:', { reply_markup: { keyboard: chunkArray(colors,3), resize_keyboard: true } }); }
-  if (state.step === 'color') { state.color = text; state.step = 'name'; return bot.sendMessage(chatId, 'Enter full name:'); }
-  if (state.step === 'name') { state.name = text; state.step = 'phone'; return bot.sendMessage(chatId, 'Enter phone number:'); }
-  if (state.step === 'phone') { state.phone = text; return askPaymentOption(chatId); }
-
-  // ===== PAYMENT SCREENSHOT (OPTIONAL) =====
-  if (msg.photo && state.step === 'payment') {
-    state.paymentScreenshot = msg.photo[msg.photo.length-1].file_id;
-    bot.sendPhoto(ADMIN_CHAT_ID, state.paymentScreenshot, { caption: `💳 PAYMENT RECEIVED\nOrder by ${state.name}` });
-    bot.sendMessage(chatId, "✅ Screenshot received by admin.");
-    postToStory(`Payment screenshot received from ${state.name}`);
-    state.step = 'delivery';
-    return askDeliveryOption(chatId);
-  }
-
-  // ===== SKIP PAYMENT =====
-  if (text && text.toLowerCase() === 'skip' && state.step === 'payment') { state.step = 'delivery'; return askDeliveryOption(chatId); }
-
-  // ===== DELIVERY OR PICKUP =====
-  if (state.step === 'delivery' && (text === 'Pickup' || text === 'Delivery')) {
-    state.deliveryType = text;
-    if (text === 'Delivery') { state.step = 'location'; return bot.sendMessage(chatId, '📍 Please share your location:', { reply_markup: { keyboard: [['Send Location']], resize_keyboard: true } }); }
-    return finalizeBeforePrice(chatId, state);
-  }
-
-  // ===== LOCATION FOR DELIVERY =====
-  if (location && state.step === 'location') { state.location = location; return finalizeBeforePrice(chatId, state); }
-
-  // ===== ADMIN ENTER PRICE =====
-  if (chatId.toString() === ADMIN_CHAT_ID && text) {
-    const pendingOrder = Object.values(orders).find(o => o.awaitingPrice);
-    if (pendingOrder) {
-      pendingOrder.price = text;
-      pendingOrder.awaitingPrice = false;
-      bot.sendMessage(pendingOrder.userChatId, `✅ Price set: GHS ${text}`);
-      postToStory(`Price set for order ${pendingOrder.orderId}`);
-      sendFinalSummary(pendingOrder);
-    }
-  }
-});
-
-// ===== ASK PAYMENT OPTION =====
+// ===== HELPER: ASK PAYMENT =====
 function askPaymentOption(chatId) {
   userStates[chatId].step = 'payment';
-  bot.sendMessage(chatId, "💳 Payment is optional. Send screenshot or type 'skip' to continue.", { reply_markup: { keyboard: [['skip']], resize_keyboard: true } });
+  bot.sendMessage(chatId, "💳 Payment is optional. Send screenshot or type 'skip' to continue.", { reply_markup: { keyboard: [['Skip']], resize_keyboard: true } });
 }
 
-// ===== ASK DELIVERY OR PICKUP =====
+// ===== HELPER: ASK DELIVERY =====
 function askDeliveryOption(chatId) {
   userStates[chatId].step = 'delivery';
   bot.sendMessage(chatId, "🏠 Pickup or Delivery?", { reply_markup: { keyboard: [['Pickup','Delivery']], resize_keyboard: true } });
 }
 
-// ===== SAVE ORDER AND WAIT FOR ADMIN PRICE =====
-function finalizeBeforePrice(chatId, state) {
-  const orderId = `ORD-${Date.now()}`;
-  orders[orderId] = { orderId, userChatId: chatId, ...state, awaitingPrice: true };
-  delete userStates[chatId];
-
-  let summary = `
-🛒 ORDER SUMMARY
-Order ID: ${orderId}
-Model: ${state.model}
-Condition: ${state.condition}
-Storage: ${state.storage}
-Color: ${state.color}
-Name: ${state.name}
-Phone: ${state.phone}
-Delivery type: ${state.deliveryType}
-Location: ${state.location ? `lat:${state.location.latitude}, long:${state.location.longitude}` : 'N/A'}
-  `;
-  bot.sendMessage(chatId, "⏳ Your order is waiting for admin price confirmation.");
-  bot.sendMessage(ADMIN_CHAT_ID, `📦 NEW ORDER (Awaiting price)\n${summary}`, {
-    reply_markup: { inline_keyboard: [[{ text: "✅ Confirm Order", callback_data: `confirm_${orderId}` }]] }
-  });
-  postToStory(`New order ${orderId} awaiting price`);
-}
-
-// ===== SEND FINAL SUMMARY TO USER =====
+// ===== HELPER: FINAL SUMMARY TO USER =====
 function sendFinalSummary(order) {
   const summary = `
 ✅ ORDER CONFIRMED
@@ -163,7 +87,7 @@ Storage: ${order.storage}
 Color: ${order.color}
 Customer: ${order.name}
 Phone: ${order.phone}
-Delivery type: ${order.deliveryType}
+Delivery type: ${order.deliveryType || 'Pickup'}
 Location: ${order.location ? `lat:${order.location.latitude}, long:${order.location.longitude}` : 'N/A'}
 💰 Price: GHS ${order.price}
 Status: PAID ✅
@@ -173,18 +97,91 @@ Status: PAID ✅
   postToStory(`Order ${order.orderId} completed for ${order.name}`);
 }
 
-// ===== CALLBACK HANDLER =====
-bot.on('callback_query', (query) => {
-  const chatId = query.message.chat.id;
-  const [action, orderId] = query.data.split('_');
-  const order = orders[orderId];
-  if (!order) return;
+// ===== FINALIZE ORDER =====
+function finalizeBeforePrice(chatId, state) {
+  const orderId = `ORD-${Date.now()}`;
+  orders[orderId] = { orderId, userChatId: chatId, ...state, awaitingPrice: true };
+  delete userStates[chatId];
 
-  if (chatId.toString() === ADMIN_CHAT_ID && action === 'confirm') {
-    bot.sendMessage(ADMIN_CHAT_ID, `💰 Enter price for order ${orderId}:`);
+  const summary = `
+🛒 ORDER SUMMARY
+Order ID: ${orderId}
+Model: ${state.model}
+Condition: ${state.condition}
+Storage: ${state.storage}
+Color: ${state.color}
+Name: ${state.name}
+Phone: ${state.phone}
+Delivery: ${state.deliveryType || 'Pickup'}
+Location: ${state.location ? `lat:${state.location.latitude}, long:${state.location.longitude}` : 'N/A'}
+Payment: ${state.paymentScreenshot || 'Skipped'}
+⚠️ Prices are NOT fixed. Admin will confirm.
+  `;
+  bot.sendMessage(chatId, "⏳ Your order is waiting for admin price confirmation.");
+  bot.sendMessage(ADMIN_CHAT_ID, `📦 NEW ORDER (Awaiting price)\n${summary}`, {
+    reply_markup: { inline_keyboard: [[{ text: "✅ Confirm Order", callback_data: `confirm_${orderId}` }]] }
+  });
+  postToStory(`New order ${orderId} awaiting price`);
+}
+
+// ===== BOT LOGIC =====
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text;
+  const location = msg.location;
+
+  if (!text && !msg.photo && !location) return;
+
+  if (/hi|hello|\/start/i.test(text) && !userStates[chatId]) {
+    userStates[chatId] = { step: 'condition' };
+    return bot.sendMessage(chatId, "👋 Welcome! Select phone condition:", { reply_markup: { keyboard: chunkArray(CONDITIONS,2), resize_keyboard: true } });
   }
-  bot.answerCallbackQuery(query.id);
+
+  const state = userStates[chatId];
+  if (!state) return;
+
+  // ===== CONDITION =====
+  if (state.step === 'condition' && CONDITIONS.includes(text)) { state.condition = text; state.step='model'; return bot.sendMessage(chatId,'Select model:',{ reply_markup:{keyboard:chunkArray(MODELS,3), resize_keyboard:true }}); }
+  // ===== MODEL =====
+  if (state.step === 'model' && MODELS.includes(text)) { state.model = text; state.step='storage'; return bot.sendMessage(chatId,'Select storage:',{ reply_markup:{keyboard:chunkArray(STORAGE,3), resize_keyboard:true }}); }
+  // ===== STORAGE =====
+  if (state.step === 'storage' && STORAGE.includes(text)) { state.storage=text; state.step='color'; const colors=state.model.includes('iPhone 17')?IPHONE_17_COLORS:COLORS; return bot.sendMessage(chatId,'Pick color:',{keyboard:chunkArray(colors,3),resize_keyboard:true}); }
+  // ===== COLOR =====
+  if (state.step==='color') { state.color=text; state.step='name'; return bot.sendMessage(chatId,'Enter full name:'); }
+  // ===== NAME =====
+  if (state.step==='name') { state.name=text; state.step='phone'; return bot.sendMessage(chatId,'Enter phone number:'); }
+  // ===== PHONE =====
+  if (state.step==='phone') { state.phone=text; return askDeliveryOption(chatId); }
+  // ===== LOCATION =====
+  if (state.step==='location' && location) { state.location=location; return finalizeBeforePrice(chatId,state); }
+  // ===== DELIVERY =====
+  if (state.step==='delivery') {
+    state.deliveryType=text;
+    if(text==='Delivery'){ state.step='location'; return bot.sendMessage(chatId,'📍 Please share your location:'); }
+    return finalizeBeforePrice(chatId,state);
+  }
+  // ===== PAYMENT SCREENSHOT (OPTIONAL) =====
+  if(state.step==='payment' && msg.photo){
+    state.paymentScreenshot=msg.photo[msg.photo.length-1].file_id;
+    bot.sendPhoto(ADMIN_CHAT_ID,state.paymentScreenshot,{caption:`💳 PAYMENT RECEIVED\nOrder by ${state.name}`});
+    postToStory(`Payment screenshot received from ${state.name}`);
+    return finalizeBeforePrice(chatId,state);
+  }
+  if(state.step==='payment' && text && text.toLowerCase()==='skip'){ state.paymentScreenshot='Skipped'; return finalizeBeforePrice(chatId,state); }
+});
+
+// ===== CALLBACK HANDLER =====
+bot.on('callback_query',(query)=>{
+  const chatId=query.message.chat.id;
+  const [action,orderId]=query.data.split('_');
+  const order=orders[orderId];
+  if(!order) return;
+
+  if(chatId.toString()===ADMIN_CHAT_ID && action==='confirm'){
+    order.awaitingPrice=true;
+    bot.sendMessage(ADMIN_CHAT_ID,`💰 Enter price for order ${orderId}:`);
+  }
 });
 
 // ===== START SERVER =====
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT,()=>console.log(`🌍 Server running on port ${PORT}`));
