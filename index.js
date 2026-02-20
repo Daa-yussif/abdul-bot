@@ -25,7 +25,6 @@ app.get('/', (req, res) => {
 const bot = new TelegramBot(BOT_TOKEN);
 bot.setWebHook(`${SERVER_URL}/bot${BOT_TOKEN}`);
 
-// Telegram webhook endpoint
 app.post(`/bot${BOT_TOKEN}`, (req, res) => {
   bot.processUpdate(req.body);
   res.sendStatus(200);
@@ -35,14 +34,24 @@ console.log(`🔹 Bot webhook set to: ${SERVER_URL}/bot${BOT_TOKEN}`);
 
 // ===== DATA =====
 const CONDITIONS = ['🆕 Brand New', '🇬🇧 UK Used iPhone'];
-const MODELS = ['iPhone 14','iPhone 15','iPhone 16','iPhone 17','iPhone 17 Pro','iPhone 17 Pro Max'];
+const MODELS = [
+  'iPhone 7','iPhone 7 Plus',
+  'iPhone 8','iPhone 8 Plus',
+  'iPhone X','iPhone XR','iPhone XS','iPhone XS Max',
+  'iPhone 11','iPhone 11 Pro','iPhone 11 Pro Max',
+  'iPhone 12','iPhone 12 Pro','iPhone 12 Pro Max',
+  'iPhone 13','iPhone 13 Pro','iPhone 13 Pro Max',
+  'iPhone 14','iPhone 14 Pro','iPhone 14 Pro Max',
+  'iPhone 15','iPhone 15 Pro','iPhone 15 Pro Max',
+  'iPhone 16','iPhone 16 Pro','iPhone 16 Pro Max',
+  'iPhone 17','iPhone 17 Pro','iPhone 17 Pro Max'
+];
 const STORAGE = ['128GB','256GB','512GB'];
 const COLORS = ['Black','White','Blue'];
 const IPHONE_17_COLORS = ['Orange','White','Black'];
 
 const userStates = {};
 const orders = {};
-let awaitingPriceOrder = null;
 
 // ================= USER MESSAGES =================
 bot.on('message', async (msg) => {
@@ -52,18 +61,26 @@ bot.on('message', async (msg) => {
   if (!text && !msg.photo) return;
 
   // ===== ADMIN ENTER PRICE =====
-  if (chatId.toString() === ADMIN_CHAT_ID && awaitingPriceOrder && text) {
-    const order = orders[awaitingPriceOrder];
-    if (!order) return;
+  if (chatId.toString() === ADMIN_CHAT_ID && text) {
+    const pendingOrder = Object.values(orders).find(o => o.awaitingPrice);
+    if (pendingOrder) {
+      pendingOrder.price = text;
+      pendingOrder.awaitingPrice = false;
 
-    order.price = text;
-    bot.sendMessage(order.userChatId,
-      `✅ Your order (${awaitingPriceOrder}) is available!\n\n💰 Price: GHS ${text}\n\nDo you want to proceed?`,
-      { reply_markup: { inline_keyboard: [[{ text: "✅ Yes", callback_data: `yes_${awaitingPriceOrder}` }],[{ text: "❌ No", callback_data: `no_${awaitingPriceOrder}` }]] } }
-    );
+      bot.sendMessage(pendingOrder.userChatId,
+        `✅ Your order (${pendingOrder.orderId}) is available!\n💰 Price: GHS ${text}\nDo you want to proceed?`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "✅ Yes", callback_data: `yes_${pendingOrder.orderId}` }],
+              [{ text: "❌ No", callback_data: `no_${pendingOrder.orderId}` }]
+            ]
+          }
+        }
+      );
 
-    bot.sendMessage(chatId, "Price sent to customer ✅");
-    awaitingPriceOrder = null;
+      bot.sendMessage(ADMIN_CHAT_ID, `Price sent to customer ✅`);
+    }
     return;
   }
 
@@ -76,7 +93,12 @@ bot.on('message', async (msg) => {
 
     bot.sendPhoto(ADMIN_CHAT_ID, fileId, {
       caption: `💳 PAYMENT RECEIVED\nOrder: ${order.orderId}\nCustomer: ${order.name}`,
-      reply_markup: { inline_keyboard: [[{ text: "✅ Approve Payment", callback_data: `approve_${order.orderId}` }],[{ text: "❌ Reject Payment", callback_data: `reject_${order.orderId}` }]] }
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "✅ Approve Payment", callback_data: `approve_${order.orderId}` }],
+          [{ text: "❌ Reject Payment", callback_data: `reject_${order.orderId}` }]
+        ]
+      }
     });
 
     bot.sendMessage(chatId, "⏳ Payment proof sent. Waiting for admin approval.");
@@ -136,7 +158,7 @@ bot.on('message', async (msg) => {
 // ================= FINALIZE ORDER =================
 function finalizeOrder(chatId, state) {
   const orderId = `ORD-${Date.now()}`;
-  orders[orderId] = { orderId, userChatId: chatId, ...state };
+  orders[orderId] = { orderId, userChatId: chatId, ...state, awaitingPrice: false, awaitingPayment: null };
 
   const summary = `
 🛒 ORDER SUMMARY
@@ -152,6 +174,8 @@ Phone: ${state.phone}
   `;
 
   bot.sendMessage(chatId, summary, { reply_markup: { remove_keyboard: true } });
+  bot.sendMessage(chatId, "⏳ Your order is waiting for admin confirmation.");
+
   bot.sendMessage(ADMIN_CHAT_ID, `📦 NEW ORDER\n${summary}`, {
     reply_markup: {
       inline_keyboard: [
@@ -172,8 +196,13 @@ bot.on('callback_query', (query) => {
   if (!order) return;
 
   if (chatId.toString() === ADMIN_CHAT_ID) {
-    if (action === 'confirm') awaitingPriceOrder = orderId;
-    if (action === 'out') bot.sendMessage(order.userChatId, `❌ Sorry, your order (${orderId}) is out of stock.`);
+    if (action === 'confirm') {
+      order.awaitingPrice = true;
+      bot.sendMessage(ADMIN_CHAT_ID, `💰 Enter price for order ${orderId}:`);
+    }
+    if (action === 'out') {
+      bot.sendMessage(order.userChatId, `❌ Sorry, your order (${orderId}) is out of stock.`);
+    }
     if (action === 'approve') {
       const finalSummary = `
 ✅ PAYMENT CONFIRMED
