@@ -56,9 +56,20 @@ bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
 
-  if (!text && !msg.photo) return;
+  if (!text && !msg.photo && !msg.location) return;
 
   const state = userStates[chatId];
+
+  // ===== HANDLE LOCATION =====
+  if (msg.location) {
+    const order = Object.values(orders).find(o => o.userChatId === chatId);
+    if (!order) return;
+    const finalSummary = getFinalSummary(order, 'Delivery', msg.location);
+    bot.sendMessage(chatId, finalSummary);
+    bot.sendMessage(ADMIN_CHAT_ID, finalSummary);
+    delete orders[order.orderId];
+    return;
+  }
 
   // ===== ADMIN ENTER PRICE / REJECT REASON =====
   if (chatId.toString() === ADMIN_CHAT_ID && text) {
@@ -67,10 +78,9 @@ bot.on('message', async (msg) => {
     if (pendingOrder) {
       pendingOrder.price = text;
       pendingOrder.awaitingPrice = false;
-      pendingOrder.status = 'confirmed'; // mark confirmed
+      pendingOrder.status = 'confirmed';
 
       sendOrderToUserForConfirmation(pendingOrder);
-
       bot.sendMessage(ADMIN_CHAT_ID, `💚 Price sent for order ${pendingOrder.orderId}`);
       return;
     }
@@ -78,6 +88,17 @@ bot.on('message', async (msg) => {
       pendingReject.rejectReason = text;
       pendingReject.awaitingRejectReason = false;
       bot.sendMessage(pendingReject.userChatId, `❌ Payment rejected. Reason: ${text}\nYou can retry or skip.`);
+      bot.sendMessage(ADMIN_CHAT_ID, `Customer notified about rejection for ${pendingReject.orderId}`);
+
+      // Ask user pickup or delivery after rejection
+      bot.sendMessage(pendingReject.userChatId, 'Will you pick up or delivery?', {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Pickup", callback_data: `pickup_${pendingReject.orderId}` }],
+            [{ text: "Delivery", callback_data: `delivery_${pendingReject.orderId}` }]
+          ]
+        }
+      });
       return;
     }
   }
@@ -119,8 +140,8 @@ Select phone condition:`,
     );
   }
 
+  // ===== FALLBACK =====
   if (!state) {
-    // ===== UNKNOWN INPUT FALLBACK =====
     return bot.sendMessage(chatId,
       `🤖 I didn't understand that.\nTo start using the bot, type: \n/start\nor say Hi, Hello, or Hey`
     );
@@ -149,7 +170,7 @@ Select phone condition:`,
 
   // ===== COLOR =====
   if (state.step === 'color') {
-    state.color = text;
+    state.color = text; // accept any typed color
     state.step = 'name';
     return bot.sendMessage(chatId, 'Enter full name:');
   }
@@ -167,13 +188,23 @@ Select phone condition:`,
     return finalizeOrder(chatId, state);
   }
 
-  // ===== PAYMENT SKIP OPTION =====
+  // ===== PAYMENT SKIP =====
   if (text === 'Skip Payment') {
     const order = Object.values(orders).find(o => o.awaitingPayment === chatId);
-    if (order) {
-      order.awaitingPayment = null;
-      bot.sendMessage(chatId, "✅ You skipped payment. Admin will review the order.");
-    }
+    if (!order) return;
+
+    order.awaitingPayment = null;
+    bot.sendMessage(chatId, "✅ You skipped payment. Admin will review the order.");
+
+    // Ask pick or delivery
+    bot.sendMessage(chatId, 'Will you pick up or delivery?', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "Pickup", callback_data: `pickup_${order.orderId}` }],
+          [{ text: "Delivery", callback_data: `delivery_${order.orderId}` }]
+        ]
+      }
+    });
   }
 });
 
@@ -207,8 +238,12 @@ bot.on('callback_query', (query) => {
     }
     if (action === 'out') {
       order.status = 'out';
-      bot.sendMessage(order.userChatId, `❌ Sorry, your order (${orderId}) is out of stock. Restarting order...`);
-      bot.sendMessage(order.userChatId, 'Type "Restart" to start a new order.');
+      bot.sendMessage(order.userChatId, `❌ Sorry, your order (${orderId}) is out of stock. Restarting order...`, {
+        reply_markup: {
+          inline_keyboard: [[{ text: "🔄 Restart Order", callback_data: `restart_${orderId}` }]]
+        }
+      });
+      delete orders[orderId];
     }
     if (action === 'approve') {
       bot.sendMessage(order.userChatId, '✅ Payment confirmed! Will you pick up or delivery?', {
@@ -226,7 +261,7 @@ bot.on('callback_query', (query) => {
     }
   }
 
-  // ===== USER CONFIRM / REJECT =====
+  // ===== USER CONFIRM / REJECT PRICE =====
   if (action === 'yes') {
     order.awaitingPayment = order.userChatId;
     bot.sendMessage(order.userChatId,
@@ -239,38 +274,33 @@ Send screenshot here or type "Skip Payment" to skip.`
     );
   }
 
-  if (action === 'no') {
-    bot.sendMessage(order.userChatId, `❌ Order (${orderId}) cancelled. Restarting order...`);
-    bot.sendMessage(order.userChatId, 'Type "Restart" to start a new order.');
+  if (action === 'no' || action === 'restart') {
     delete orders[orderId];
+    userStates[chatId] = { step: 'condition' };
+    bot.sendMessage(chatId,
+      `👋 Restarting order. Select phone condition:`,
+      { reply_markup: { keyboard: chunkArray(CONDITIONS, 2), resize_keyboard: true } }
+    );
   }
 
   // ===== PICKUP / DELIVERY =====
-  if (action === 'pickup' || action === 'delivery') {
-    const method = action === 'pickup' ? 'Pickup' : 'Delivery';
-    const finalSummary = `
-✅ ORDER COMPLETED
-🛒 ORDER DETAILS
-Order ID: ${order.orderId}
-Model: ${order.model}
-Condition: ${order.condition}
-Storage: ${order.storage}
-Color: ${order.color}
-Customer: ${order.name}
-Phone: ${order.phone}
-💰 Price: GHS ${order.price}
-Method: ${method}
-Status: PAID ✅
-    `;
-    bot.sendMessage(order.userChatId, finalSummary);
+  if (action === 'pickup') {
+    const finalSummary = getFinalSummary(order, 'Pickup');
+    bot.sendMessage(order.userChatId, finalSummary + `\n🏪 Shop Location: [Your Shop Address]`);
     bot.sendMessage(ADMIN_CHAT_ID, finalSummary);
     delete orders[orderId];
+  }
+
+  if (action === 'delivery') {
+    bot.sendMessage(order.userChatId, '📍 Please share your location for delivery.', {
+      reply_markup: { keyboard: [[{ text: "Send Location", request_location: true }]], resize_keyboard: true }
+    });
   }
 
   bot.answerCallbackQuery(query.id);
 });
 
-// ===== HELPER FUNCTIONS =====
+// ===== HELPERS =====
 function chunkArray(arr, size) {
   const result = [];
   for (let i = 0; i < arr.length; i += size) result.push(arr.slice(i, i + size));
@@ -332,6 +362,28 @@ function sendOrderToUserForConfirmation(order) {
       }
     }
   );
+}
+
+function getFinalSummary(order, method, location = null) {
+  let locText = method === 'Delivery' && location ? 
+      `Customer Location: ${location.latitude}, ${location.longitude}` : 
+      `Shop Location: [Your Shop Address]`;
+
+  return `
+✅ ORDER COMPLETED
+🛒 ORDER DETAILS
+Order ID: ${order.orderId}
+Model: ${order.model}
+Condition: ${order.condition}
+Storage: ${order.storage}
+Color: ${order.color}
+Customer: ${order.name}
+Phone: ${order.phone}
+💰 Price: GHS ${order.price || 'Pending'}
+Method: ${method}
+${locText}
+Status: PAID ✅
+  `;
 }
 
 // ===== START SERVER =====
