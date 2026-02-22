@@ -48,6 +48,8 @@ const MODELS = [
 const STORAGE = ['32GB','64GB','128GB','256GB','512GB','1TB'];
 const COLORS = ['Black','White','Red'];
 
+const SHOP_LOCATION = "OBUASI OPPOSITE SARK MOMO SHOP";
+
 const userStates = {};
 const orders = {};
 
@@ -55,21 +57,8 @@ const orders = {};
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
-
   if (!text && !msg.photo && !msg.location) return;
-
   const state = userStates[chatId];
-
-  // ===== HANDLE LOCATION =====
-  if (msg.location) {
-    const order = Object.values(orders).find(o => o.userChatId === chatId);
-    if (!order) return;
-    const finalSummary = getFinalSummary(order, 'Delivery', msg.location);
-    bot.sendMessage(chatId, finalSummary);
-    bot.sendMessage(ADMIN_CHAT_ID, finalSummary);
-    delete orders[order.orderId];
-    return;
-  }
 
   // ===== ADMIN ENTER PRICE / REJECT REASON =====
   if (chatId.toString() === ADMIN_CHAT_ID && text) {
@@ -78,8 +67,7 @@ bot.on('message', async (msg) => {
     if (pendingOrder) {
       pendingOrder.price = text;
       pendingOrder.awaitingPrice = false;
-      pendingOrder.status = 'confirmed';
-
+      pendingOrder.status = 'confirmed'; 
       sendOrderToUserForConfirmation(pendingOrder);
       bot.sendMessage(ADMIN_CHAT_ID, `💚 Price sent for order ${pendingOrder.orderId}`);
       return;
@@ -88,17 +76,6 @@ bot.on('message', async (msg) => {
       pendingReject.rejectReason = text;
       pendingReject.awaitingRejectReason = false;
       bot.sendMessage(pendingReject.userChatId, `❌ Payment rejected. Reason: ${text}\nYou can retry or skip.`);
-      bot.sendMessage(ADMIN_CHAT_ID, `Customer notified about rejection for ${pendingReject.orderId}`);
-
-      // Ask user pickup or delivery after rejection
-      bot.sendMessage(pendingReject.userChatId, 'Will you pick up or delivery?', {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "Pickup", callback_data: `pickup_${pendingReject.orderId}` }],
-            [{ text: "Delivery", callback_data: `delivery_${pendingReject.orderId}` }]
-          ]
-        }
-      });
       return;
     }
   }
@@ -125,8 +102,25 @@ bot.on('message', async (msg) => {
     return;
   }
 
+  // ===== LOCATION SHARING =====
+  if (msg.location && state?.step === 'delivery') {
+    const order = Object.values(orders).find(o => o.userChatId === chatId && o.awaitingLocation);
+    if (!order) return;
+    order.awaitingLocation = null;
+    order.location = msg.location;
+
+    bot.sendMessage(ADMIN_CHAT_ID,
+      `📍 Delivery location for order ${order.orderId}:\n[View on Map](https://www.google.com/maps?q=${msg.location.latitude},${msg.location.longitude})`,
+      { parse_mode: 'Markdown' }
+    );
+
+    bot.sendMessage(chatId, "✅ Location received! Your order is confirmed.");
+    sendNewOrderButton(chatId);
+    return;
+  }
+
   // ===== START / WELCOME =====
-  if (/hi|hello|hey|\/start/i.test(text)) {
+  if (!state && /hi|hello|hey|\/start/i.test(text)) {
     userStates[chatId] = { step: 'condition' };
     return bot.sendMessage(chatId,
       `Welcome to *Abdul iPhone Shop*! 👋  
@@ -140,7 +134,6 @@ Select phone condition:`,
     );
   }
 
-  // ===== FALLBACK =====
   if (!state) {
     return bot.sendMessage(chatId,
       `🤖 I didn't understand that.\nTo start using the bot, type: \n/start\nor say Hi, Hello, or Hey`
@@ -170,7 +163,7 @@ Select phone condition:`,
 
   // ===== COLOR =====
   if (state.step === 'color') {
-    state.color = text; // accept any typed color
+    state.color = text; 
     state.step = 'name';
     return bot.sendMessage(chatId, 'Enter full name:');
   }
@@ -187,25 +180,6 @@ Select phone condition:`,
     state.phone = text;
     return finalizeOrder(chatId, state);
   }
-
-  // ===== PAYMENT SKIP =====
-  if (text === 'Skip Payment') {
-    const order = Object.values(orders).find(o => o.awaitingPayment === chatId);
-    if (!order) return;
-
-    order.awaitingPayment = null;
-    bot.sendMessage(chatId, "✅ You skipped payment. Admin will review the order.");
-
-    // Ask pick or delivery
-    bot.sendMessage(chatId, 'Will you pick up or delivery?', {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "Pickup", callback_data: `pickup_${order.orderId}` }],
-          [{ text: "Delivery", callback_data: `delivery_${order.orderId}` }]
-        ]
-      }
-    });
-  }
 });
 
 // ================= FINALIZE ORDER =================
@@ -214,7 +188,6 @@ function finalizeOrder(chatId, state) {
   orders[orderId] = { orderId, userChatId: chatId, ...state, awaitingPrice: true, awaitingPayment: null, status: 'new' };
 
   const summary = getOrderTextForUser(orders[orderId]);
-
   bot.sendMessage(chatId, summary, { reply_markup: { remove_keyboard: true } });
   bot.sendMessage(chatId, "⏳ Your order is waiting for admin confirmation.");
 
@@ -238,12 +211,16 @@ bot.on('callback_query', (query) => {
     }
     if (action === 'out') {
       order.status = 'out';
-      bot.sendMessage(order.userChatId, `❌ Sorry, your order (${orderId}) is out of stock. Restarting order...`, {
-        reply_markup: {
-          inline_keyboard: [[{ text: "🔄 Restart Order", callback_data: `restart_${orderId}` }]]
+      bot.sendMessage(order.userChatId,
+        `❌ Sorry, your order (${orderId}) is out of stock. Restart if you want to order again.`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🔄 Restart Order", callback_data: `restart_${orderId}` }]
+            ]
+          }
         }
-      });
-      delete orders[orderId];
+      );
     }
     if (action === 'approve') {
       bot.sendMessage(order.userChatId, '✅ Payment confirmed! Will you pick up or delivery?', {
@@ -261,7 +238,7 @@ bot.on('callback_query', (query) => {
     }
   }
 
-  // ===== USER CONFIRM / REJECT PRICE =====
+  // ===== USER CONFIRM / REJECT =====
   if (action === 'yes') {
     order.awaitingPayment = order.userChatId;
     bot.sendMessage(order.userChatId,
@@ -270,37 +247,89 @@ bot.on('callback_query', (query) => {
 📞 0593827001
 Account Name: Daa Yussif
 
-Send screenshot here or type "Skip Payment" to skip.`
-    );
+Send screenshot or tap Skip Payment.`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "💳 Send Payment Screenshot", callback_data: `pay_${orderId}` }],
+          [{ text: "⏭ Skip Payment", callback_data: `skip_${orderId}` }]
+        ]
+      }
+    });
   }
 
-  if (action === 'no' || action === 'restart') {
+  if (action === 'no') {
+    bot.sendMessage(order.userChatId, `❌ Order (${orderId}) cancelled. Restarting order...`);
+    sendNewOrderButton(order.userChatId);
     delete orders[orderId];
-    userStates[chatId] = { step: 'condition' };
-    bot.sendMessage(chatId,
-      `👋 Restarting order. Select phone condition:`,
-      { reply_markup: { keyboard: chunkArray(CONDITIONS, 2), resize_keyboard: true } }
+  }
+
+  // ===== SKIP PAYMENT =====
+  if (action === 'skip') {
+    order.awaitingPayment = null;
+    bot.sendMessage(order.userChatId,
+      `✅ You skipped payment. Now choose pickup or delivery:`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Pickup", callback_data: `pickup_${orderId}` }],
+            [{ text: "Delivery", callback_data: `delivery_${orderId}` }]
+          ]
+        }
+      }
     );
   }
 
   // ===== PICKUP / DELIVERY =====
-  if (action === 'pickup') {
-    const finalSummary = getFinalSummary(order, 'Pickup');
-    bot.sendMessage(order.userChatId, finalSummary + `\n🏪 Shop Location: [Your Shop Address]`);
-    bot.sendMessage(ADMIN_CHAT_ID, finalSummary);
-    delete orders[orderId];
+  if (action === 'pickup' || action === 'delivery') {
+    const method = action === 'pickup' ? 'Pickup' : 'Delivery';
+
+    if (method === 'Delivery') {
+      order.awaitingLocation = true;
+      order.step = 'delivery';
+      bot.sendMessage(order.userChatId, "📍 Please share your location for delivery.");
+      return;
+    }
+
+    // For Pickup, automatically share shop location
+    if (method === 'Pickup') {
+      const finalSummary = `
+✅ ORDER COMPLETED
+🛒 ORDER DETAILS
+Order ID: ${order.orderId}
+Model: ${order.model}
+Condition: ${order.condition}
+Storage: ${order.storage}
+Color: ${order.color}
+Customer: ${order.name}
+Phone: ${order.phone}
+💰 Price: GHS ${order.price}
+Method: ${method}
+Pickup Location: ${SHOP_LOCATION}
+Status: PAID ✅
+      `;
+
+      bot.sendMessage(order.userChatId, finalSummary);
+      bot.sendMessage(ADMIN_CHAT_ID, finalSummary);
+      sendNewOrderButton(order.userChatId);
+      delete orders[orderId];
+    }
   }
 
-  if (action === 'delivery') {
-    bot.sendMessage(order.userChatId, '📍 Please share your location for delivery.', {
-      reply_markup: { keyboard: [[{ text: "Send Location", request_location: true }]], resize_keyboard: true }
-    });
+  // ===== RESTART ORDER =====
+  if (action === 'restart' || action === 'restart_manual') {
+    userStates[order.userChatId || chatId] = { step: 'condition' };
+    bot.sendMessage(order.userChatId || chatId,
+      `🔄 Starting a new order. Select phone condition:`,
+      { reply_markup: { keyboard: chunkArray(CONDITIONS, 2), resize_keyboard: true } }
+    );
+    delete orders[orderId];
   }
 
   bot.answerCallbackQuery(query.id);
 });
 
-// ===== HELPERS =====
+// ===== HELPER FUNCTIONS =====
 function chunkArray(arr, size) {
   const result = [];
   for (let i = 0; i < arr.length; i += size) result.push(arr.slice(i, i + size));
@@ -364,26 +393,17 @@ function sendOrderToUserForConfirmation(order) {
   );
 }
 
-function getFinalSummary(order, method, location = null) {
-  let locText = method === 'Delivery' && location ? 
-      `Customer Location: ${location.latitude}, ${location.longitude}` : 
-      `Shop Location: [Your Shop Address]`;
-
-  return `
-✅ ORDER COMPLETED
-🛒 ORDER DETAILS
-Order ID: ${order.orderId}
-Model: ${order.model}
-Condition: ${order.condition}
-Storage: ${order.storage}
-Color: ${order.color}
-Customer: ${order.name}
-Phone: ${order.phone}
-💰 Price: GHS ${order.price || 'Pending'}
-Method: ${method}
-${locText}
-Status: PAID ✅
-  `;
+function sendNewOrderButton(chatId) {
+  bot.sendMessage(chatId,
+    `🔄 Want to place a new order? Tap below to start:`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🛒 Start New Order", callback_data: `restart_manual` }]
+        ]
+      }
+    }
+  );
 }
 
 // ===== START SERVER =====
