@@ -160,8 +160,27 @@ bot.on('message', async (msg) => {
     order.location = msg.location;
     const mapsLink = `https://www.google.com/maps?q=${msg.location.latitude},${msg.location.longitude}`;
     bot.sendMessage(ADMIN_CHAT_ID, `📍 Delivery location for order ${order.orderId}:\n[View on Map](${mapsLink})`, { parse_mode:'Markdown' });
-    bot.sendMessage(order.userChatId, "✅ Location received!");
+
+    // Print summary after location
+    const deliverySummary = `
+✅ ORDER COMPLETED
+🛒 ORDER DETAILS
+Order ID: ${order.orderId}
+Model: ${order.model}
+Condition: ${order.condition}
+Storage: ${order.storage}
+Color: ${order.color}
+Customer: ${order.name}
+Phone: ${order.phone}
+💰 Price: GHS ${order.price || 'Pending'}
+Method: Delivery
+Delivery Location: [View on Map](${mapsLink})
+Status: ${order.status==='skipped_payment'?'SKIPPED PAYMENT ⚠️':'PAID ✅'}
+`;
+    bot.sendMessage(order.userChatId, deliverySummary, { parse_mode:'Markdown' });
+    bot.sendMessage(ADMIN_CHAT_ID, deliverySummary, { parse_mode:'Markdown' });
     sendNewOrderButton(order.userChatId);
+    delete orders[order.orderId];
   }
 
   // ===== START / WELCOME =====
@@ -206,7 +225,7 @@ Select phone condition:`,
 
   // ===== COLOR =====
   if(state.step==='color'){
-    state.color = text;
+    state.color = text.trim(); // Accept predefined or custom color
     state.step='name';
     return bot.sendMessage(chatId,'Enter full name:');
   }
@@ -230,12 +249,10 @@ Select phone condition:`,
     if(order){
       order.awaitingPayment = null;
       order.status = 'skipped_payment';
-      bot.sendMessage(chatId, "✅ You skipped payment. Admin will review the order.");
-      bot.sendMessage(chatId,"Will you pick up or want delivery?", { reply_markup:{ inline_keyboard:[[{ text:"Pickup",callback_data:`pickup_${order.orderId}`}],[{ text:"Delivery",callback_data:`delivery_${order.orderId}`}]] } });
+      bot.sendMessage(chatId, "✅ You skipped payment. Will you pick up or want delivery?", { reply_markup:{ inline_keyboard:[[{ text:"Pickup", callback_data:`pickup_${order.orderId}`}],[{ text:"Delivery", callback_data:`delivery_${order.orderId}`}]] } });
       bot.sendMessage(ADMIN_CHAT_ID, `ℹ️ User skipped payment for order ${order.orderId}.`);
     }
   }
-
 });
 
 // ================= FINALIZE ORDER =================
@@ -266,6 +283,7 @@ bot.on('callback_query', query => {
     }
     if(action==='approve'){ 
       bot.sendMessage(order.userChatId, '✅ Payment confirmed! Will you pick up or want delivery?', { reply_markup:{ inline_keyboard:[[{ text:"Pickup",callback_data:`pickup_${orderId}`}],[{ text:"Delivery",callback_data:`delivery_${orderId}`}]] } });
+      bot.sendMessage(ADMIN_CHAT_ID, `ℹ️ Payment approval message sent to user for order ${orderId}.`);
     }
     if(action==='reject'){ order.awaitingRejectReason=true; bot.sendMessage(ADMIN_CHAT_ID, `Provide reason for rejecting payment of ${orderId}:`); }
   }
@@ -284,6 +302,7 @@ bot.on('callback_query', query => {
       bot.sendMessage(order.userChatId,"📍 Please share your location for delivery.");
       return;
     }
+
     // Pickup auto share shop location
     const deliveryInfo = `Pickup Location: ${SHOP_LOCATION}`;
     const finalSummary = `
